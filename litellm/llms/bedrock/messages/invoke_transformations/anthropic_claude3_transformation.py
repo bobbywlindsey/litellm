@@ -1,8 +1,18 @@
-import json
-from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
 
 import httpx
 
+from litellm.llms.anthropic.common_utils import AnthropicModelInfo
 from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
     AnthropicMessagesConfig,
 )
@@ -13,6 +23,9 @@ from litellm.llms.bedrock.chat.invoke_handler import AWSEventStreamDecoder
 from litellm.llms.bedrock.chat.invoke_transformations.base_invoke_transformation import (
     AmazonInvokeConfig,
 )
+from litellm.llms.bedrock.common_utils import get_anthropic_beta_from_headers
+from litellm.types.llms.anthropic import ANTHROPIC_TOOL_SEARCH_BETA_HEADER
+from litellm.types.llms.openai import AllMessageValues
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import GenericStreamingChunk
 from litellm.types.utils import GenericStreamingChunk as GChunk
@@ -26,12 +39,13 @@ else:
     LiteLLMLoggingObj = Any
 
 
-class AmazonAnthropicClaude3MessagesConfig(
+class AmazonAnthropicClaudeMessagesConfig(
     AnthropicMessagesConfig,
     AmazonInvokeConfig,
 ):
     """
     Call Claude model family in the /v1/messages API spec
+    Supports anthropic_beta parameter for beta features.
     """
 
     DEFAULT_BEDROCK_ANTHROPIC_API_VERSION = "bedrock-2023-05-31"
@@ -58,6 +72,7 @@ class AmazonAnthropicClaude3MessagesConfig(
         optional_params: dict,
         request_data: dict,
         api_base: str,
+        api_key: Optional[str] = None,
         model: Optional[str] = None,
         stream: Optional[bool] = None,
         fake_stream: Optional[bool] = None,
@@ -68,6 +83,7 @@ class AmazonAnthropicClaude3MessagesConfig(
             optional_params=optional_params,
             request_data=request_data,
             api_base=api_base,
+            api_key=api_key,
             model=model,
             stream=stream,
             fake_stream=fake_stream,
@@ -108,7 +124,6 @@ class AmazonAnthropicClaude3MessagesConfig(
             litellm_params=litellm_params,
             headers=headers,
         )
-
         #########################################################
         ############## BEDROCK Invoke SPECIFIC TRANSFORMATION ###
         #########################################################
@@ -126,6 +141,41 @@ class AmazonAnthropicClaude3MessagesConfig(
         # 3. `model` is not allowed in request body for bedrock invoke
         if "model" in anthropic_messages_request:
             anthropic_messages_request.pop("model", None)
+            
+        # 4. AUTO-INJECT beta headers based on features used
+        anthropic_model_info = AnthropicModelInfo()
+        tools = anthropic_messages_optional_request_params.get("tools")
+        messages_typed = cast(List[AllMessageValues], messages)
+        tool_search_used = anthropic_model_info.is_tool_search_used(tools)
+        programmatic_tool_calling_used = anthropic_model_info.is_programmatic_tool_calling_used(
+            tools
+        )
+        input_examples_used = anthropic_model_info.is_input_examples_used(tools)
+
+        beta_set = set(get_anthropic_beta_from_headers(headers))
+        auto_betas = anthropic_model_info.get_anthropic_beta_list(
+            model=model,
+            optional_params=anthropic_messages_optional_request_params,
+            computer_tool_used=anthropic_model_info.is_computer_tool_used(tools),
+            prompt_caching_set=False,
+            file_id_used=anthropic_model_info.is_file_id_used(messages_typed),
+            mcp_server_used=anthropic_model_info.is_mcp_server_used(
+                anthropic_messages_optional_request_params.get("mcp_servers")
+            ),
+        )
+        beta_set.update(auto_betas)
+
+        if (
+            tool_search_used
+            and not (programmatic_tool_calling_used or input_examples_used)
+        ):
+            beta_set.discard(ANTHROPIC_TOOL_SEARCH_BETA_HEADER)
+            if "opus-4" in model.lower() or "opus_4" in model.lower():
+                beta_set.add("tool-search-tool-2025-10-19")
+
+        if beta_set:
+            anthropic_messages_request["anthropic_beta"] = list(beta_set)
+            
         return anthropic_messages_request
 
     def get_async_streaming_response_iterator(
@@ -142,25 +192,34 @@ class AmazonAnthropicClaude3MessagesConfig(
             httpx_response.aiter_bytes(chunk_size=aws_decoder.DEFAULT_CHUNK_SIZE)
         )
         # Convert decoded Bedrock events to Server-Sent Events expected by Anthropic clients.
-        return self.bedrock_sse_wrapper(completion_stream)
+        return self.bedrock_sse_wrapper(
+            completion_stream=completion_stream, 
+            litellm_logging_obj=litellm_logging_obj,
+            request_body=request_body,
+        )
 
     async def bedrock_sse_wrapper(
         self,
         completion_stream: AsyncIterator[
             Union[bytes, GenericStreamingChunk, ModelResponseStream, dict]
         ],
+        litellm_logging_obj: LiteLLMLoggingObj,
+        request_body: dict,
     ):
         """
         Bedrock invoke does not return SSE formatted data. This function is a wrapper to ensure litellm chunks are SSE formatted.
         """
-        async for chunk in completion_stream:
-            if isinstance(chunk, dict):
-                event_type: str = str(chunk.get("type", "message"))
-                payload = f"event: {event_type}\n" f"data: {json.dumps(chunk)}\n\n"
-                yield payload.encode()
-            else:
-                # For non-dict chunks, forward the original value unchanged so callers can leverage the richer Python objects if they wish.
-                yield chunk
+        from litellm.llms.anthropic.experimental_pass_through.messages.streaming_iterator import (
+            BaseAnthropicMessagesStreamingIterator,
+        )
+        handler = BaseAnthropicMessagesStreamingIterator(
+            litellm_logging_obj=litellm_logging_obj,
+            request_body=request_body,
+        )
+        
+        async for chunk in handler.async_sse_wrapper(completion_stream):
+            yield chunk
+        
 
 
 class AmazonAnthropicClaudeMessagesStreamDecoder(AWSEventStreamDecoder):

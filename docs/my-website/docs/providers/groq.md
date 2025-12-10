@@ -156,7 +156,9 @@ We support ALL Groq models, just set `groq/` as a prefix when sending completion
 | llama3-70b-8192    | `completion(model="groq/llama3-70b-8192", messages)`    | 
 | llama2-70b-4096    | `completion(model="groq/llama2-70b-4096", messages)`    | 
 | mixtral-8x7b-32768 | `completion(model="groq/mixtral-8x7b-32768", messages)` |
-| gemma-7b-it        | `completion(model="groq/gemma-7b-it", messages)`        |  
+| gemma-7b-it        | `completion(model="groq/gemma-7b-it", messages)`        |
+| moonshotai/kimi-k2-instruct | `completion(model="groq/moonshotai/kimi-k2-instruct", messages)` |
+| qwen3-32b       | `completion(model="groq/qwen/qwen3-32b", messages)`       |
 
 ## Groq - Tool / Function Calling Example
 
@@ -288,7 +290,7 @@ response = completion(
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+                                "url": "https://awsmp-logos.s3.amazonaws.com/seller-xw5kijmvmzasy/c233c9ade2ccb5491072ae232c814942.png"
                                 }
                             }
                         ]
@@ -340,7 +342,7 @@ response = client.chat.completions.create(
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+                                "url": "https://awsmp-logos.s3.amazonaws.com/seller-xw5kijmvmzasy/c233c9ade2ccb5491072ae232c814942.png"
                                 }
                             }
                         ]

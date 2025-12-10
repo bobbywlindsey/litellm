@@ -1,9 +1,16 @@
 model_list:
-  - model_name: gemini/*
+  - model_name: openai/gpt-4o-mini
     litellm_params:
-      model: gemini/*
-      api_key: os.environ/GEMINI_API_KEY
-  - model_name: "anthropic/*"
-    litellm_params:
-      model: "anthropic/*"
-      api_key: os.environ/ANTHROPIC_API_KEY
+      model: openai/gpt-4o-mini
+      tpm: 1000
+
+
+litellm_settings:
+  callbacks: ["dynamic_rate_limiter_v3"]
+  priority_reservation:
+    "prod": 0.9 # 90% reserved for production
+    "dev": 0.1 # 10% reserved for development
+
+
+
+

@@ -15,12 +15,14 @@ sys.path.insert(
 
 import logging
 import time
+import asyncio
 
 import pytest
 from typing import Optional
 import litellm
 from litellm import create_batch, create_file
 from litellm._logging import verbose_logger
+import openai
 
 verbose_logger.setLevel(logging.DEBUG)
 
@@ -146,12 +148,24 @@ async def test_create_batch(provider):
     with open(result_file_name, "wb") as file:
         file.write(result)
 
-    # Cancel Batch
-    cancel_batch_response = await litellm.acancel_batch(
-        batch_id=create_batch_response.id,
-        custom_llm_provider=provider,
-    )
-    print("cancel_batch_response=", cancel_batch_response)
+    # Cancel Batch - handle race condition where batch may already be completed
+    try:
+        cancel_batch_response = await litellm.acancel_batch(
+            batch_id=create_batch_response.id,
+            custom_llm_provider=provider,
+        )
+        print("cancel_batch_response=", cancel_batch_response)
+    except openai.ConflictError as e:
+        # Only allow to pass if it's specifically the "batch already completed" error
+        if "Cannot cancel a batch with status 'completed'" in str(e):
+            print(f"Batch already completed, cannot cancel: {e}")
+        else:
+            # Re-raise other ConflictError types
+            raise
+    except Exception as e:
+        # Re-raise any other unexpected errors
+        print(f"Unexpected error during batch cancellation: {e}")
+        raise
 
     pass
 
@@ -355,12 +369,24 @@ async def test_async_create_batch(provider):
     with open(result_file_name, "wb") as file:
         file.write(file_content.content)
 
-    # Cancel Batch
-    cancel_batch_response = await litellm.acancel_batch(
-        batch_id=create_batch_response.id,
-        custom_llm_provider=provider,
-    )
-    print("cancel_batch_response=", cancel_batch_response)
+    # Cancel Batch - handle race condition where batch may already be completed
+    try:
+        cancel_batch_response = await litellm.acancel_batch(
+            batch_id=create_batch_response.id,
+            custom_llm_provider=provider,
+        )
+        print("cancel_batch_response=", cancel_batch_response)
+    except openai.ConflictError as e:
+        # Only allow to pass if it's specifically the "batch already completed" error
+        if "Cannot cancel a batch with status 'completed'" in str(e):
+            print(f"Batch already completed, cannot cancel: {e}")
+        else:
+            # Re-raise other ConflictError types
+            raise
+    except Exception as e:
+        # Re-raise any other unexpected errors
+        print(f"Unexpected error during batch cancellation: {e}")
+        raise
 
     if random.randint(1, 3) == 1:
         print("Running random cleanup of Azure files and models...")
@@ -419,6 +445,18 @@ mock_vertex_batch_response = {
     "updateTime": "2025-02-15T05:51:08.741Z",
     "labels": {"key1": "value1", "key2": "value2"},
     "completionStats": {"successfulCount": 0, "failedCount": 0, "remainingCount": 100},
+}
+
+mock_vertex_list_response = {
+    "batchPredictionJobs": [
+        mock_vertex_batch_response,
+        {
+            **mock_vertex_batch_response,
+            "name": "projects/123456789/locations/us-central1/batchPredictionJobs/test-batch-id-789",
+            "state": "JOB_STATE_SUCCEEDED",
+        },
+    ],
+    "nextPageToken": "",
 }
 
 
@@ -507,3 +545,35 @@ async def test_avertex_batch_prediction(monkeypatch):
             print("retrieved_batch=", retrieved_batch)
 
             assert retrieved_batch.id == "test-batch-id-456"
+
+
+@pytest.mark.asyncio
+async def test_vertex_list_batches(monkeypatch):
+    monkeypatch.setenv("GCS_BUCKET_NAME", "litellm-local")
+    monkeypatch.setenv("VERTEXAI_PROJECT", "litellm-test-project")
+    monkeypatch.setenv("VERTEXAI_LOCATION", "us-central1")
+
+    monkeypatch.setattr(
+        "litellm.llms.vertex_ai.batches.handler.VertexAIBatchPrediction._ensure_access_token",
+        lambda self, credentials, project_id, custom_llm_provider: ("mock-token", "litellm-test-project"),
+    )
+
+    with patch(
+        "litellm.llms.custom_httpx.http_handler.AsyncHTTPHandler.get"
+    ) as mock_get:
+        mock_get_response = MagicMock()
+        mock_get_response.json.return_value = mock_vertex_list_response
+        mock_get_response.status_code = 200
+        mock_get_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_get_response
+
+        list_response = await litellm.alist_batches(
+            custom_llm_provider="vertex_ai",
+            limit=2,
+        )
+
+        assert list_response["object"] == "list"
+        assert list_response["has_more"] is False
+        assert len(list_response["data"]) == 2
+        assert list_response["data"][0].id == "test-batch-id-456"
+        assert list_response["data"][1].id == "test-batch-id-789"

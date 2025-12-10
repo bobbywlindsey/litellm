@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, List, Optional, Union
+from typing import TYPE_CHECKING, Any, List, Optional, Union, cast
 
 import httpx
 
@@ -20,7 +20,7 @@ from litellm.types.utils import ModelResponse, TextCompletionResponse
 
 if TYPE_CHECKING:
     from ..success_handler import PassThroughEndpointLogging
-    from ..types import EndpointType
+    from litellm.types.passthrough_endpoints.pass_through_endpoints import EndpointType
 else:
     PassThroughEndpointLogging = Any
     EndpointType = Any
@@ -96,10 +96,22 @@ class AnthropicPassthroughLoggingHandler:
         handles streaming and non-streaming responses
         """
         try:
+            # Get custom_llm_provider from logging object if available (e.g., azure_ai for Azure Anthropic)
+            custom_llm_provider = logging_obj.model_call_details.get(
+                "custom_llm_provider"
+            )
+
+            # Prepend custom_llm_provider to model if not already present
+            model_for_cost = model
+            if custom_llm_provider and not model.startswith(f"{custom_llm_provider}/"):
+                model_for_cost = f"{custom_llm_provider}/{model}"
+
             response_cost = litellm.completion_cost(
                 completion_response=litellm_model_response,
-                model=model,
+                model=model_for_cost,
+                custom_llm_provider=custom_llm_provider,
             )
+
             kwargs["response_cost"] = response_cost
             kwargs["model"] = model
             passthrough_logging_payload: Optional[PassthroughStandardLoggingPayload] = (  # type: ignore
@@ -125,9 +137,10 @@ class AnthropicPassthroughLoggingHandler:
             litellm_model_response.id = logging_obj.litellm_call_id
             litellm_model_response.model = model
             logging_obj.model_call_details["model"] = model
-            logging_obj.model_call_details["custom_llm_provider"] = (
-                litellm.LlmProviders.ANTHROPIC.value
-            )
+            if not logging_obj.model_call_details.get("custom_llm_provider"):
+                logging_obj.model_call_details["custom_llm_provider"] = (
+                    litellm.LlmProviders.ANTHROPIC.value
+                )
             return kwargs
         except Exception as e:
             verbose_proxy_logger.exception(
@@ -155,6 +168,14 @@ class AnthropicPassthroughLoggingHandler:
         """
 
         model = request_body.get("model", "")
+        # Check if it's available in the logging object
+        if (
+            not model
+            and hasattr(litellm_logging_obj, "model_call_details")
+            and litellm_logging_obj.model_call_details.get("model")
+        ):
+            model = cast(str, litellm_logging_obj.model_call_details.get("model"))
+
         complete_streaming_response = (
             AnthropicPassthroughLoggingHandler._build_complete_streaming_response(
                 all_chunks=all_chunks,
@@ -213,6 +234,7 @@ class AnthropicPassthroughLoggingHandler:
             except (StopIteration, StopAsyncIteration):
                 break
         complete_streaming_response = litellm.stream_chunk_builder(
-            chunks=all_openai_chunks
+            chunks=all_openai_chunks,
+            logging_obj=litellm_logging_obj,
         )
         return complete_streaming_response
